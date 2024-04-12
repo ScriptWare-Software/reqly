@@ -5,6 +5,7 @@
         "./lib/Cargo.toml",
         "./lib/Cargo.toml",
         "./lib/Cargo.toml",
+        "./lib/Cargo.toml",
         "./lib/Cargo.toml"
     ]
 }

@@ -1,11 +1,17 @@
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use tokio::sync::mpsc;
-use futures::{future::FutureExt, stream::StreamExt, SinkExt};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream};
+use tokio::sync::{mpsc, Mutex};
+use futures::{SinkExt, StreamExt};
+use std::sync::Arc;
 use url::Url;
 use std::error::Error;
+use tokio::net::TcpStream;
+use tokio::time::{sleep, Duration};
+
+type WebSocketConnection = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 pub struct WebSocketManager {
     sender: mpsc::Sender<WebSocketCommand>,
+    connections: Arc<Mutex<Vec<WebSocketConnection>>>, // shared state across tasks
 }
 
 enum WebSocketCommand {
@@ -16,21 +22,21 @@ enum WebSocketCommand {
 impl WebSocketManager {
     pub fn new() -> Self {
         let (sender, mut receiver) = mpsc::channel(32);
-        let manager = WebSocketManager { sender };
+        let connections = Arc::new(Mutex::new(Vec::new())); // Initialize with a shared, mutable vector
+        let manager = WebSocketManager { sender, connections: connections.clone() };
 
         tokio::spawn(async move {
-            let mut connections = vec![];
-
             while let Some(command) = receiver.recv().await {
                 match command {
                     WebSocketCommand::SendMessage(id, msg) => {
-                        if let Some(conn) = connections.get_mut(id) {
+                        if let Some(conn) = connections.lock().await.get_mut(id) {
                             let _ = conn.send(Message::Text(msg)).await;
                         }
                     }
                     WebSocketCommand::Close(id) => {
-                        if id < connections.len() {
-                            let _ = connections.remove(id);
+                        let mut conns = connections.lock().await;
+                        if id < conns.len() {
+                            conns.remove(id); // Properly remove the connection
                         }
                     }
                 }
@@ -40,41 +46,48 @@ impl WebSocketManager {
         manager
     }
 
-    pub fn connect(&self, url: &str) -> Result<usize, Box<dyn Error>> {
+    pub async fn connect(&self, url: &str) -> Result<usize, Box<dyn Error>> {
         let url = Url::parse(url)?;
-        let sender = self.sender.clone();
+        let (ws_stream, _) = connect_async(url).await?;
+        let mut conns = self.connections.lock().await;
 
-        tokio::spawn(async move {
-            let (ws_stream, _) = connect_async(url).await.expect("Failed to connect");
-            let (write, mut read) = ws_stream.split();
+        let id = conns.len();  // Get new ID for the connection
+        conns.push(ws_stream); // Store the connection
 
-            let (tx, mut rx) = mpsc::channel(32);
-            tokio::spawn(async move {
-                while let Some(msg) = rx.recv().await {
-                    write.send(msg).await.expect("Failed to send message");
-                }
-            });
-
-            while let Some(message) = read.next().await {
-                match message.expect("Failed to read message") {
-                    Message::Text(txt) => println!("Received: {}", txt),
-                    Message::Close(_) => break,
-                    _ => (),
-                }
-            }
-
-            let _ = sender.send(WebSocketCommand::Close(0)).await; // Replace with correct ID
-        });
-
-        // Return connection ID
-        Ok(0) // Replace with correct ID management
+        Ok(id) // Return the new connection ID
     }
 
-    pub fn send_message(&self, connection_id: usize, message: String) {
-        let _ = self.sender.send(WebSocketCommand::SendMessage(connection_id, message));
+    pub async fn send_message(&self, connection_id: usize, message: String) -> Result<(), Box<dyn Error>> {
+        let mut conns = self.connections.lock().await;
+        if let Some(conn) = conns.get_mut(connection_id) {
+            conn.send(Message::Text(message)).await?;
+        }
+        Ok(())
     }
 
-    pub fn close_connection(&self, connection_id: usize) {
-        let _ = self.sender.send(WebSocketCommand::Close(connection_id));
+    pub async fn close_connection(&self, connection_id: usize) {
+        let _ = self.sender.send(WebSocketCommand::Close(connection_id)).await;
     }
+}
+
+
+#[tokio::test]
+async fn test_websocket_manager() {
+    let manager = WebSocketManager::new();
+
+    let connection_id = manager.connect("").await.unwrap();
+
+    let message = "hello!".to_string();
+    manager.send_message(connection_id, message.clone()).await.unwrap();
+
+    sleep(Duration::from_millis(100)).await;
+
+    let mut conns = manager.connections.lock().await;
+    let conn = conns.get_mut(connection_id).unwrap();
+    let msg = conn.next().await.unwrap().unwrap();
+    
+    assert_eq!(msg, Message::Text(message));
+
+    manager.close_connection(connection_id).await;
+    assert_eq!(conns.len(), 0);
 }
