@@ -17,3 +17,7 @@ url = "2.5.0"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = {version = "0.16", features = ["native-tls"]}
 futures = "0.3"
+log = "0.4.21"
+env_logger = "0.11.3"
+jsonwebtoken = "9.3.0"
+socketio-rs = "0.1.8"

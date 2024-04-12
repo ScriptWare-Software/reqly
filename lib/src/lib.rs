@@ -16,4 +16,4 @@ mod http;
 mod websocket;
 
 pub use http::{HttpRequest, HttpResponse, HttpRequestGroup, send_http_request};
-pub use websocket::WebSocketManager;
+pub use websocket::{WebSocketManager, UdpManager, SocketIOManager, TcpManager};
